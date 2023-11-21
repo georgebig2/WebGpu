@@ -40,12 +40,12 @@
         }
 	};
 
-	const HeightMapX = 512;
-    const HeightMapY = 512;
+	const HeightMapX = 512*1;
+    const HeightMapY = 512*1;
 	const HeightMapS = HeightMapX * HeightMapY + 2;
 
-	const MAX_UNITS_IN_WORKGROUP = 50;
-    const MaxNumUnits = MAX_UNITS_IN_WORKGROUP * 10;
+	const MAX_UNITS_IN_WORKGROUP = 128*10;
+    const MaxNumUnits = MAX_UNITS_IN_WORKGROUP * 1;
 	const WORKGROUP_SIZE = 8;
 	const NUM_BATCHES = MaxNumUnits / MAX_UNITS_IN_WORKGROUP;
 
@@ -143,7 +143,7 @@
 		//gpuBuffer_Units.unmap();
 	}
 
-    const gpuBuffer_Mask = device.createBuffer({ mappedAtCreation: true, size: HeightMapS*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+    const gpuBuffer_Mask = device.createBuffer({ mappedAtCreation: true, size: HeightMapS*4, usage: GPUBufferUsage.STORAGE});
 	{
 		const stagingData = new Float32Array(gpuBuffer_Mask.getMappedRange());
 		stagingData[0] = HeightMapX; stagingData[1] = HeightMapY;
@@ -242,13 +242,13 @@
 				entryPoint: "main"
 			}
 		});
-		/*const computePipelineClear = device.createComputePipeline({
+		const computePipelineClear = device.createComputePipeline({
 			layout: "auto",
 			compute: {
 				module: computeModuleClear,
 				entryPoint: "clear"
 			}
-		});*/
+		});
 		const bindGroupC = device.createBindGroup({
 			layout: computePipeline.getBindGroupLayout(0),
 			entries: [
@@ -272,7 +272,7 @@
                 }
 			]
 		});
-		/*const bindGroupClear = device.createBindGroup({
+		const bindGroupClear = device.createBindGroup({
 			layout: computePipelineClear.getBindGroupLayout(0),
 			entries: [
 				{
@@ -282,7 +282,7 @@
 					}
 				}
 			]
-		});*/
+		});
 
 
 	const cellShaderModule = device.createShaderModule({
@@ -385,7 +385,7 @@
 		PrevTime = curTime;
 		fpsText.innerHTML = `ms: ${fps.toFixed(2)}`;
 
-		if(1){
+		if(0){
 			let tmp = new Float32Array(HeightMapX*HeightMapY + 2);
 			tmp[0] = HeightMapX;
 			tmp[1] = HeightMapY;
@@ -395,14 +395,14 @@
         const workgroupCountX = Math.ceil(HeightMapX / WORKGROUP_SIZE);
         const workgroupCountY = Math.ceil(HeightMapY / WORKGROUP_SIZE);
 		//const encoder = device.createCommandEncoder();
-		if (0){
-			//const encoder = device.createCommandEncoder();
-			//const passEncoder = encoder.beginComputePass();
-			//passEncoder.setBindGroup(0, bindGroupClear);
-			//passEncoder.setPipeline(computePipelineClear);
-			//passEncoder.dispatchWorkgroups(workgroupCountX, workgroupCountY);
-			//passEncoder.end();
-			//device.queue.submit([encoder.finish()]);
+		if (1){
+			const encoder = device.createCommandEncoder();
+			const passEncoder = encoder.beginComputePass();
+			passEncoder.setBindGroup(0, bindGroupClear);
+			passEncoder.setPipeline(computePipelineClear);
+			passEncoder.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+			passEncoder.end();
+			device.queue.submit([encoder.finish()]);
 		}
 		//const encoder = device.createCommandEncoder();
 		if (1)
@@ -415,12 +415,12 @@
 				for (let i = 0; i < MaxNumUnits; ++i) {
 					_Units[i * 3 + 1] = Math.random();
 					_Units[i * 3 + 2] = Math.random();
-					_Units[i * 3 + 3] = Math.random() / 10 + 0.05;
+					_Units[i * 3 + 3] = Math.random() / 20 + 0.05;
 				}
 			}
 			_Units[0 * 3 + 1] = MouseX;
 			_Units[0 * 3 + 2] = MouseY;
-			_Units[0 * 3 + 3] = 0.2;
+			_Units[0 * 3 + 3] = 0.1;
 		}
 
 		for (let b = 0; b < NUM_BATCHES; ++b)
