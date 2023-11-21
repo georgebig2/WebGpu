@@ -40,13 +40,14 @@
         }
 	};
 
-	const HeightMapX = 1024;
-    const HeightMapY = 1024;
+	const HeightMapX = 512;
+    const HeightMapY = 512;
 	const HeightMapS = HeightMapX * HeightMapY + 2;
 
-	const MAX_UNITS_IN_WORKGROUP = 5;
-    const MaxNumUnits = MAX_UNITS_IN_WORKGROUP * 2;
+	const MAX_UNITS_IN_WORKGROUP = 50;
+    const MaxNumUnits = MAX_UNITS_IN_WORKGROUP * 10;
 	const WORKGROUP_SIZE = 8;
+	const NUM_BATCHES = MaxNumUnits / MAX_UNITS_IN_WORKGROUP;
 
 
 	
@@ -172,7 +173,7 @@
 			data : array<f32>,
         }
         struct Units {
-			size : f32,
+			//size : f32,
 			data : array<f32>,
         }
         @group(0) @binding(0) var<storage, read_write>  _Mask : Matrix;
@@ -187,33 +188,15 @@
 			_Mask.data[index] = 0.f;
 		}*/
 		
-		fn mymod(x:u32, y:u32) -> u32
-		{
-			let xf = f32(x);
-			let yf = f32(y);
-			let df = xf / yf;
- 			return x - y * u32(trunc(df));
-		}
-
         @compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
         fn main(@builtin(global_invocation_id) global_id : vec3u)
 		{
 			let numUnitsInBatch = u32(${MAX_UNITS_IN_WORKGROUP});
-			let numBatches = u32(_Units.size) / numUnitsInBatch;
-			
-			//let resultCell = vec2(global_id.x / numBatches, global_id.y);
-			//let u1 = mymod(global_id.x, numBatches) * numUnitsInBatch;
-			//let u2 = u1 + numUnitsInBatch;
-
-			//let idx = global_id.x - u32(_Height.size.x) * u32(f32(global_id.x) / f32(_Height.size.x));
-			let idx = mymod(global_id.x, u32(_Height.size.x));
-			let resultCell = vec2(idx, global_id.y);
-			let u1 = (global_id.x / u32(_Height.size.x)) * numUnitsInBatch;
-			let u2 = u1 + numUnitsInBatch;
-
+			let resultCell = vec2(global_id.x, global_id.y);
             let index = resultCell.x + resultCell.y * u32(_Height.size.x);
 			//_Mask.data[index] = 0.f;
-			for (var i = u1; i < u2; i++)
+
+			for (var i = 0u; i < numUnitsInBatch; i++)
 			{
 			    let cpos = vec2(_Units.data[3 * i], _Units.data[3 * i + 1]);
 				let pos = vec2(f32(resultCell.x), f32(resultCell.y)) / _Height.size.xy;
@@ -221,7 +204,7 @@
 			    
 				let radius = _Units.data[3 * i + 2];
 				var v = smoothstep(radius, radius*0.5f, dist);
-				if (v < 0 && dist > 1.f/_Height.size.x)
+				if (v > 0 && dist > 1.f/_Height.size.x)
 				{
 					let dp = (cpos - pos) / dist /_Height.size.x;
 					var p = pos;
@@ -331,7 +314,7 @@
 			let id = idx + idy * u32(_Mask.size.x); 
 			let h = _HeightMap.data[id];
 			let c = _Mask.data[id];
-			let v = c;//(c+0.2)*h;
+			let v = (c+0.2)*h;
 			return vec4f(0.01, v, 0.01, 1);
 		}
 	  `
@@ -402,6 +385,26 @@
 		PrevTime = curTime;
 		fpsText.innerHTML = `ms: ${fps.toFixed(2)}`;
 
+		if(1){
+			let tmp = new Float32Array(HeightMapX*HeightMapY + 2);
+			tmp[0] = HeightMapX;
+			tmp[1] = HeightMapY;
+			tmp.fill(0,2);
+			device.queue.writeBuffer(gpuBuffer_Mask, 0, tmp);
+		}
+        const workgroupCountX = Math.ceil(HeightMapX / WORKGROUP_SIZE);
+        const workgroupCountY = Math.ceil(HeightMapY / WORKGROUP_SIZE);
+		//const encoder = device.createCommandEncoder();
+		if (0){
+			//const encoder = device.createCommandEncoder();
+			//const passEncoder = encoder.beginComputePass();
+			//passEncoder.setBindGroup(0, bindGroupClear);
+			//passEncoder.setPipeline(computePipelineClear);
+			//passEncoder.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+			//passEncoder.end();
+			//device.queue.submit([encoder.finish()]);
+		}
+		//const encoder = device.createCommandEncoder();
 		if (1)
 		{
 			if (_Units.length < MaxNumUnits*3 + 1)
@@ -418,38 +421,23 @@
 			_Units[0 * 3 + 1] = MouseX;
 			_Units[0 * 3 + 2] = MouseY;
 			_Units[0 * 3 + 3] = 0.2;
-			device.queue.writeBuffer(gpuBuffer_Units, 0, _Units);
-			//}
+		}
+
+		for (let b = 0; b < NUM_BATCHES; ++b)
+		{
+			device.queue.writeBuffer(gpuBuffer_Units, 0, _Units, b*MAX_UNITS_IN_WORKGROUP*3+1, MAX_UNITS_IN_WORKGROUP*3);
+			
+			const encoder = device.createCommandEncoder();
+			const passEncoder = encoder.beginComputePass();
+			passEncoder.setBindGroup(0, bindGroupC);
+			passEncoder.setPipeline(computePipeline);
+			passEncoder.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+			passEncoder.end();
+			device.queue.submit([encoder.finish()]);
         }
 
-		if(1){
-			let tmp = new Float32Array(HeightMapX*HeightMapY + 2);
-			tmp[0] = HeightMapX;
-			tmp[1] = HeightMapY;
-			tmp.fill(0,2);
-			device.queue.writeBuffer(gpuBuffer_Mask, 0, tmp);
-		}
-        const workgroupCountX = Math.ceil(HeightMapX / WORKGROUP_SIZE);
-        const workgroupCountY = Math.ceil(HeightMapY / WORKGROUP_SIZE);
+
 		const encoder = device.createCommandEncoder();
-		if (0){
-			//const encoder = device.createCommandEncoder();
-			//const passEncoder = encoder.beginComputePass();
-			//passEncoder.setBindGroup(0, bindGroupClear);
-			//passEncoder.setPipeline(computePipelineClear);
-			//passEncoder.dispatchWorkgroups(workgroupCountX, workgroupCountY);
-			//passEncoder.end();
-			//device.queue.submit([encoder.finish()]);
-		}
-		//const encoder = device.createCommandEncoder();
-		const passEncoder = encoder.beginComputePass();
-		passEncoder.setBindGroup(0, bindGroupC);
-		passEncoder.setPipeline(computePipeline);
-		const numBatches =  Math.ceil(MaxNumUnits / MAX_UNITS_IN_WORKGROUP);
-		passEncoder.dispatchWorkgroups(workgroupCountX*numBatches, workgroupCountY);
-		passEncoder.end();
-
-
 		const pass = encoder.beginRenderPass({
 			colorAttachments: [{
 				view: context.getCurrentTexture().createView(),
