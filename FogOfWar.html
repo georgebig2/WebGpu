@@ -1,0 +1,478 @@
+<!doctype html>
+
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>WebGPU Life</title>
+  </head>
+  <body style="background-color:DarkSlateGray;">
+	<div id="fpsText">FPS: 00</div>
+    <canvas width="1024" height="1024"></canvas>
+    <script type="module">
+      const canvas = document.querySelector("canvas");
+		const fpsText = document.getElementById("fpsText");// as HTMLElement;
+
+      // Your WebGPU code will begin here!
+	if (!navigator.gpu) {
+		throw new Error("WebGPU not supported on this browser.");
+	}
+	const adapter = await navigator.gpu.requestAdapter();
+	if (!adapter) {
+		throw new Error("No appropriate GPUAdapter found.");
+	}
+	const device = await adapter.requestDevice();
+	const context = canvas.getContext("webgpu");
+	const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+	context.configure({
+		device: device,
+		format: canvasFormat,
+	});
+
+	let MouseX = 0;
+    let MouseY = 0;
+	canvas.onpointermove = (e) =>
+	{
+        MouseX = (e.x / canvas.width - 0) ;
+        MouseY = (e.y / canvas.height - 0);
+        if (e.buttons) {
+            //camera.position.x -= e.movementX * 0.002 * orthoSize;
+            //camera.position.y += e.movementY * 0.002 * orthoSize;
+        }
+	};
+
+	const HeightMapX = 1024;
+    const HeightMapY = 1024;
+	const HeightMapS = HeightMapX * HeightMapY + 2;
+
+	const MAX_UNITS_IN_WORKGROUP = 5;
+    const MaxNumUnits = MAX_UNITS_IN_WORKGROUP * 2;
+	const WORKGROUP_SIZE = 8;
+
+
+	
+    const gpuBuffer_HeightMap = device.createBuffer({mappedAtCreation: true, size: HeightMapS*4, usage: GPUBufferUsage.STORAGE});
+	{
+        const stagingData = new Float32Array(gpuBuffer_HeightMap.getMappedRange());
+		stagingData[0] = HeightMapX; stagingData[1] = HeightMapY;
+        function randomHeight(variance, base)
+		{
+			for (let x = 0; x < HeightMapX; ++x)
+			{
+				for (let y = 0; y < HeightMapY; ++y)
+				{
+                    let h = Math.random() * variance + base;
+					stagingData[x + y * HeightMapX+2] = h;
+                }
+			}
+		}
+        function blurHeight()
+		{
+			for (let x = 0; x < HeightMapX; ++x)
+			{
+				for (let y = 0; y < HeightMapY; ++y)
+				{
+                    let id = x + y * HeightMapX;
+                    let id1 = ((x + HeightMapX - 1) % HeightMapX) + y * HeightMapX;
+                    let id2 = ((x + 1) % HeightMapX) + y * HeightMapX;
+                    let id3 = x + ((y + HeightMapX - 1) % HeightMapX) * HeightMapX;
+                    let id4 = x + ((y + 1) % HeightMapX) * HeightMapX;
+					let h = (stagingData[id1 + 2] + stagingData[id2 + 2] + stagingData[id3 + 2] + stagingData[id4 + 2]) / 4;
+					stagingData[id + 2] = h;
+                }
+			}
+		}
+        function contrastHeight(val, base)
+		{
+			for (let x = 0; x < HeightMapX; ++x)
+			{
+				for (let y = 0; y < HeightMapY; ++y)
+				{
+                    let h = stagingData[x + y * HeightMapX+2];
+					if (h <= base) 
+						h *= val;
+					else
+						h = 1.0 - (h-base)*val;
+					stagingData[x + y * HeightMapX+2] = h;
+                }
+			}
+		}
+        function drawBox(X, Y, DX, DY, H)
+		{
+			for (let x = X; x < Math.min(X+DX,HeightMapX); ++x)
+			{
+				for (let y = Y; y < Math.min(Y+DY,HeightMapY); ++y)
+				{
+					stagingData[x + y * HeightMapX+2] = H;
+                }
+			}
+		}
+        function randomBoxes(num)
+		{
+			for (let i = 0; i < num; ++i)
+			{
+				let x = Math.random() * HeightMapX;
+				let y = Math.random() * HeightMapY;
+				let sx = (0.5*Math.random()+0.5) * HeightMapX/10;
+				let sy = (0.5*Math.random()+0.5) * HeightMapY/10;
+				let h = Math.random() * 0.5 + 0.5;
+				drawBox(Math.floor(x), Math.floor(y), Math.floor(sx), Math.floor(sy), h);
+			}
+		}
+
+		randomHeight(0, 0.3);
+		for (let i = 0; i < 0; ++i) {
+            blurHeight();
+        }
+		//contrastHeight(0.8, 0.5);
+		drawBox(HeightMapX/2, HeightMapY/2, HeightMapX/10,HeightMapX/10, 1.0);
+		randomBoxes(100);
+
+        gpuBuffer_HeightMap.unmap();
+	}
+
+    let _Units = new Float32Array([
+		1, 
+        0.5, 0.5, 0.1, 
+        0.7, 0.8, 0.1 
+    ]);
+    const gpuBuffer_Units = device.createBuffer({ mappedAtCreation: false, size: (MaxNumUnits * 3 + 1)*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+	{
+		//const arrayBuffer_Units = gpuBuffer_Units.getMappedRange();
+		//new Float32Array(arrayBuffer_Units).set(_Units);
+		//gpuBuffer_Units.unmap();
+	}
+
+    const gpuBuffer_Mask = device.createBuffer({ mappedAtCreation: true, size: HeightMapS*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST});
+	{
+		const stagingData = new Float32Array(gpuBuffer_Mask.getMappedRange());
+		stagingData[0] = HeightMapX; stagingData[1] = HeightMapY;
+		gpuBuffer_Mask.unmap();
+	}
+	const computeModuleClear = device.createShaderModule({
+        code: `
+        struct Matrix {
+			size : vec2<f32>,
+			data : array<f32>,
+        }
+        @group(0) @binding(0) var<storage, read_write>  _Mask : Matrix;
+
+		@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
+        fn clear(@builtin(global_invocation_id) global_id : vec3<u32>)
+		{
+			let resultCell = vec2(global_id.x, global_id.y);
+	        let index = resultCell.x + resultCell.y * u32(_Mask.size.x);
+			_Mask.data[index] = 0.f;
+		}
+    `
+	});
+    const computeModule = device.createShaderModule({
+        code: `
+        struct Matrix {
+			size : vec2<f32>,
+			data : array<f32>,
+        }
+        struct Units {
+			size : f32,
+			data : array<f32>,
+        }
+        @group(0) @binding(0) var<storage, read_write>  _Mask : Matrix;
+        @group(0) @binding(1) var<storage, read>		_Height : Matrix;
+        @group(0) @binding(2) var<storage, read>		_Units : Units;
+
+		/*@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
+        fn clear(@builtin(global_invocation_id) global_id : vec3u)
+		{
+			let resultCell = vec2(global_id.x, global_id.y);
+	        let index = resultCell.x + resultCell.y * u32(_Mask.size.x);
+			_Mask.data[index] = 0.f;
+		}*/
+		
+		fn mymod(x:u32, y:u32) -> u32
+		{
+			let xf = f32(x);
+			let yf = f32(y);
+			let df = xf / yf;
+ 			return x - y * u32(trunc(df));
+		}
+
+        @compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
+        fn main(@builtin(global_invocation_id) global_id : vec3u)
+		{
+			let numUnitsInBatch = u32(${MAX_UNITS_IN_WORKGROUP});
+			let numBatches = u32(_Units.size) / numUnitsInBatch;
+			
+			//let resultCell = vec2(global_id.x / numBatches, global_id.y);
+			//let u1 = mymod(global_id.x, numBatches) * numUnitsInBatch;
+			//let u2 = u1 + numUnitsInBatch;
+
+			//let idx = global_id.x - u32(_Height.size.x) * u32(f32(global_id.x) / f32(_Height.size.x));
+			let idx = mymod(global_id.x, u32(_Height.size.x));
+			let resultCell = vec2(idx, global_id.y);
+			let u1 = (global_id.x / u32(_Height.size.x)) * numUnitsInBatch;
+			let u2 = u1 + numUnitsInBatch;
+
+            let index = resultCell.x + resultCell.y * u32(_Height.size.x);
+			//_Mask.data[index] = 0.f;
+			for (var i = u1; i < u2; i++)
+			{
+			    let cpos = vec2(_Units.data[3 * i], _Units.data[3 * i + 1]);
+				let pos = vec2(f32(resultCell.x), f32(resultCell.y)) / _Height.size.xy;
+				let dist = length(cpos - pos);
+			    
+				let radius = _Units.data[3 * i + 2];
+				var v = smoothstep(radius, radius*0.5f, dist);
+				if (v < 0 && dist > 1.f/_Height.size.x)
+				{
+					let dp = (cpos - pos) / dist /_Height.size.x;
+					var p = pos;
+					let cindex = u32(cpos.x * _Height.size.x) + u32(cpos.y * _Height.size.y) * u32(_Height.size.x);
+					let h0 = _Height.data[cindex];
+					let snum = u32(dist * _Height.size.x);
+					for (var s = 0u; s < snum; s++)
+					{
+						let pindex = u32(p.x * _Height.size.x) + u32(p.y * _Height.size.y) * u32(_Height.size.x);
+						let h = _Height.data[pindex];
+						//_Mask.data[pindex] = 1.f;
+						if (h - h0 > 0.01f) 
+						{
+							v = 0.f;
+							break;
+						}
+						p += dp;
+					}
+				}
+
+				//v = f32(u1/numUnitsInBatch)/f32(numBatches);//global_id.x)/1024.f/8.f;
+				let val = max(_Mask.data[index], v);
+				//let val = _Mask.data[index] + v;
+				_Mask.data[index] = val;
+				//if (val >= 1) {break;}
+			}
+        }
+    `
+	});
+
+		const computePipeline = device.createComputePipeline({
+			layout: "auto",
+			compute: {
+				module: computeModule,
+				entryPoint: "main"
+			}
+		});
+		/*const computePipelineClear = device.createComputePipeline({
+			layout: "auto",
+			compute: {
+				module: computeModuleClear,
+				entryPoint: "clear"
+			}
+		});*/
+		const bindGroupC = device.createBindGroup({
+			layout: computePipeline.getBindGroupLayout(0),
+			entries: [
+				{
+					binding: 0,
+					resource: {
+						buffer: gpuBuffer_Mask
+					}
+				},
+				{
+					binding: 1,
+					resource: {
+						buffer: gpuBuffer_HeightMap
+					}
+				},
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: gpuBuffer_Units
+                    }
+                }
+			]
+		});
+		/*const bindGroupClear = device.createBindGroup({
+			layout: computePipelineClear.getBindGroupLayout(0),
+			entries: [
+				{
+					binding: 0,
+					resource: {
+						buffer: gpuBuffer_Mask
+					}
+				}
+			]
+		});*/
+
+
+	const cellShaderModule = device.createShaderModule({
+	  label: 'Cell shader',
+		code: `
+        struct Matrix {
+	        size : vec2<f32>,
+            data: array<f32>,
+        }
+		@group(0) @binding(0) var<storage, read> _Mask : Matrix;
+		@group(0) @binding(1) var<storage, read> _HeightMap : Matrix;
+		
+		struct VertexOutput {
+			@builtin(position) pos: vec4f,
+		};
+
+		@vertex
+		fn vertexMain(@location(0) pos: vec2f) -> VertexOutput
+		{
+			var output: VertexOutput;
+			output.pos = vec4f(pos, 0, 1);
+			return output;
+		}
+		@fragment
+		fn fragmentMain(input: VertexOutput) -> @location(0) vec4f
+		{
+			let idx = u32(input.pos.x/1024 * _Mask.size.x);
+			let idy = u32(input.pos.y/1024 * _Mask.size.y);
+			let id = idx + idy * u32(_Mask.size.x); 
+			let h = _HeightMap.data[id];
+			let c = _Mask.data[id];
+			let v = c;//(c+0.2)*h;
+			return vec4f(0.01, v, 0.01, 1);
+		}
+	  `
+	});
+
+	const vertices = new Float32Array([
+	  -1., -1.,
+	   1., -1.,
+	   1.,  1.,
+	  -1., -1.,
+	   1.,  1.,
+	  -1.,  1.,
+	]);
+	const vertexBuffer = device.createBuffer({
+		label: "Cell vertices",
+		size: vertices.byteLength,
+		usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+	});
+	device.queue.writeBuffer(vertexBuffer, /*bufferOffset=*/0, vertices);
+	
+	const vertexBufferLayout = {
+		arrayStride: 8,
+		attributes: [{
+			format: "float32x2",
+			offset: 0,
+			shaderLocation: 0, // Position, see vertex shader
+		}],
+	};
+	const cellPipeline = device.createRenderPipeline({
+	  label: "Cell pipeline",
+	  layout: "auto",
+	  vertex: {
+		module: cellShaderModule,
+		entryPoint: "vertexMain",
+		buffers: [vertexBufferLayout]
+	  },
+	  fragment: {
+		module: cellShaderModule,
+		entryPoint: "fragmentMain",
+		targets: [{
+		  format: canvasFormat
+		}]
+	  }
+	});
+    const bindGroup = device.createBindGroup({
+        layout: cellPipeline.getBindGroupLayout(0 /* index */),
+		entries: [
+        {
+            binding: 0,
+            resource: {
+                buffer: gpuBuffer_Mask
+            }
+        },
+		{
+			binding: 1,
+			resource: {
+				buffer: gpuBuffer_HeightMap
+			}
+		}
+		]
+    });
+
+    let PrevTime = 0;
+	function updateFrame()
+	{
+        const curTime = performance.now();
+		const fps = curTime - PrevTime;
+		PrevTime = curTime;
+		fpsText.innerHTML = `ms: ${fps.toFixed(2)}`;
+
+		if (1)
+		{
+			if (_Units.length < MaxNumUnits*3 + 1)
+			{
+				_Units = new Float32Array(MaxNumUnits*3 + 1);
+				_Units[0] = MaxNumUnits;
+				
+				for (let i = 0; i < MaxNumUnits; ++i) {
+					_Units[i * 3 + 1] = Math.random();
+					_Units[i * 3 + 2] = Math.random();
+					_Units[i * 3 + 3] = Math.random() / 10 + 0.05;
+				}
+			}
+			_Units[0 * 3 + 1] = MouseX;
+			_Units[0 * 3 + 2] = MouseY;
+			_Units[0 * 3 + 3] = 0.2;
+			device.queue.writeBuffer(gpuBuffer_Units, 0, _Units);
+			//}
+        }
+
+		if(1){
+			let tmp = new Float32Array(HeightMapX*HeightMapY + 2);
+			tmp[0] = HeightMapX;
+			tmp[1] = HeightMapY;
+			tmp.fill(0,2);
+			device.queue.writeBuffer(gpuBuffer_Mask, 0, tmp);
+		}
+        const workgroupCountX = Math.ceil(HeightMapX / WORKGROUP_SIZE);
+        const workgroupCountY = Math.ceil(HeightMapY / WORKGROUP_SIZE);
+		const encoder = device.createCommandEncoder();
+		if (0){
+			//const encoder = device.createCommandEncoder();
+			//const passEncoder = encoder.beginComputePass();
+			//passEncoder.setBindGroup(0, bindGroupClear);
+			//passEncoder.setPipeline(computePipelineClear);
+			//passEncoder.dispatchWorkgroups(workgroupCountX, workgroupCountY);
+			//passEncoder.end();
+			//device.queue.submit([encoder.finish()]);
+		}
+		//const encoder = device.createCommandEncoder();
+		const passEncoder = encoder.beginComputePass();
+		passEncoder.setBindGroup(0, bindGroupC);
+		passEncoder.setPipeline(computePipeline);
+		const numBatches =  Math.ceil(MaxNumUnits / MAX_UNITS_IN_WORKGROUP);
+		passEncoder.dispatchWorkgroups(workgroupCountX*numBatches, workgroupCountY);
+		passEncoder.end();
+
+
+		const pass = encoder.beginRenderPass({
+			colorAttachments: [{
+				view: context.getCurrentTexture().createView(),
+				loadOp: "clear",
+				clearValue: { r: 0, g: 0, b: 0.4, a: 1 }, // New line
+				storeOp: "store",
+			}],
+		});
+
+		pass.setPipeline(cellPipeline);
+		pass.setBindGroup(0, bindGroup);
+		pass.setVertexBuffer(0, vertexBuffer);
+		pass.draw(vertices.length / 2);
+	
+		pass.end();
+	
+		//const commandBuffer = encoder.finish();
+		//device.queue.submit([commandBuffer]);
+		// Finish the command buffer and immediately submit it.
+		device.queue.submit([encoder.finish()]);
+	}
+    setInterval(updateFrame, 16);
+	//updateFrame();
+    </script>
+  </body>
+</html>
