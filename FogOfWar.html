@@ -42,19 +42,18 @@
 
 	const HeightMapX = 512*1;
     const HeightMapY = 512*1;
-	const HeightMapS = HeightMapX * HeightMapY + 2;
 
-	const MAX_UNITS_IN_WORKGROUP = 128*10;
+	const NUM_WORKGROUP_BATCHES = 4;
+	const MAX_UNITS_IN_WORKGROUP = NUM_WORKGROUP_BATCHES * 32 * 1;
     const MaxNumUnits = MAX_UNITS_IN_WORKGROUP * 1;
+	const NUM_DISPATCH_BATCHES = MaxNumUnits / MAX_UNITS_IN_WORKGROUP;
 	const WORKGROUP_SIZE = 8;
-	const NUM_BATCHES = MaxNumUnits / MAX_UNITS_IN_WORKGROUP;
-
 
 	
-    const gpuBuffer_HeightMap = device.createBuffer({mappedAtCreation: true, size: HeightMapS*4, usage: GPUBufferUsage.STORAGE});
+    const gpuBuffer_HeightMap = device.createBuffer({mappedAtCreation: true, size: HeightMapX*HeightMapY*4, usage: GPUBufferUsage.STORAGE});
 	{
         const stagingData = new Float32Array(gpuBuffer_HeightMap.getMappedRange());
-		stagingData[0] = HeightMapX; stagingData[1] = HeightMapY;
+		//stagingData[0] = HeightMapX; stagingData[1] = HeightMapY;
         function randomHeight(variance, base)
 		{
 			for (let x = 0; x < HeightMapX; ++x)
@@ -62,7 +61,7 @@
 				for (let y = 0; y < HeightMapY; ++y)
 				{
                     let h = Math.random() * variance + base;
-					stagingData[x + y * HeightMapX+2] = h;
+					stagingData[x + y * HeightMapX] = h;
                 }
 			}
 		}
@@ -77,8 +76,8 @@
                     let id2 = ((x + 1) % HeightMapX) + y * HeightMapX;
                     let id3 = x + ((y + HeightMapX - 1) % HeightMapX) * HeightMapX;
                     let id4 = x + ((y + 1) % HeightMapX) * HeightMapX;
-					let h = (stagingData[id1 + 2] + stagingData[id2 + 2] + stagingData[id3 + 2] + stagingData[id4 + 2]) / 4;
-					stagingData[id + 2] = h;
+					let h = (stagingData[id1] + stagingData[id2] + stagingData[id3] + stagingData[id4]) / 4;
+					stagingData[id] = h;
                 }
 			}
 		}
@@ -88,12 +87,12 @@
 			{
 				for (let y = 0; y < HeightMapY; ++y)
 				{
-                    let h = stagingData[x + y * HeightMapX+2];
+                    let h = stagingData[x + y * HeightMapX];
 					if (h <= base) 
 						h *= val;
 					else
 						h = 1.0 - (h-base)*val;
-					stagingData[x + y * HeightMapX+2] = h;
+					stagingData[x + y * HeightMapX] = h;
                 }
 			}
 		}
@@ -103,7 +102,7 @@
 			{
 				for (let y = Y; y < Math.min(Y+DY,HeightMapY); ++y)
 				{
-					stagingData[x + y * HeightMapX+2] = H;
+					stagingData[x + y * HeightMapX] = H;
                 }
 			}
 		}
@@ -136,84 +135,86 @@
         0.5, 0.5, 0.1, 
         0.7, 0.8, 0.1 
     ]);
-    const gpuBuffer_Units = device.createBuffer({ mappedAtCreation: false, size: (MaxNumUnits * 3 + 1)*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const gpuBuffer_Units = device.createBuffer({ mappedAtCreation: false, size: (MAX_UNITS_IN_WORKGROUP * 3 + 1)*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
 	{
 		//const arrayBuffer_Units = gpuBuffer_Units.getMappedRange();
 		//new Float32Array(arrayBuffer_Units).set(_Units);
 		//gpuBuffer_Units.unmap();
 	}
 
-    const gpuBuffer_Mask = device.createBuffer({ mappedAtCreation: true, size: HeightMapS*4, usage: GPUBufferUsage.STORAGE});
+    const gpuBuffer_Mask = device.createBuffer({ mappedAtCreation: true, size: (HeightMapX*HeightMapY)*4, usage: GPUBufferUsage.STORAGE});
 	{
 		const stagingData = new Float32Array(gpuBuffer_Mask.getMappedRange());
-		stagingData[0] = HeightMapX; stagingData[1] = HeightMapY;
+		//stagingData[0] = HeightMapX; stagingData[1] = HeightMapY;
 		gpuBuffer_Mask.unmap();
 	}
 	const computeModuleClear = device.createShaderModule({
         code: `
-        struct Matrix {
-			size : vec2<f32>,
+        struct FloatBuffer {
 			data : array<f32>,
         }
-        @group(0) @binding(0) var<storage, read_write>  _Mask : Matrix;
+        @group(0) @binding(0) var<storage, read_write>  _Mask : FloatBuffer;
 
 		@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
         fn clear(@builtin(global_invocation_id) global_id : vec3<u32>)
 		{
+			let maskWidth = u32(${HeightMapX});
 			let resultCell = vec2(global_id.x, global_id.y);
-	        let index = resultCell.x + resultCell.y * u32(_Mask.size.x);
+	        let index = resultCell.x + resultCell.y * maskWidth;
 			_Mask.data[index] = 0.f;
 		}
     `
 	});
     const computeModule = device.createShaderModule({
         code: `
-        struct Matrix {
-			size : vec2<f32>,
-			data : array<f32>,
+        struct FloatBuffer {
+            data: array<f32>,
         }
         struct Units {
 			//size : f32,
 			data : array<f32>,
         }
-        @group(0) @binding(0) var<storage, read_write>  _Mask : Matrix;
-        @group(0) @binding(1) var<storage, read>		_Height : Matrix;
+        @group(0) @binding(0) var<storage, read_write>  _Mask : FloatBuffer;
+        @group(0) @binding(1) var<storage, read>		_Height : FloatBuffer;
         @group(0) @binding(2) var<storage, read>		_Units : Units;
 
 		/*@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
         fn clear(@builtin(global_invocation_id) global_id : vec3u)
 		{
+			let maskWidth = u32(${HeightMapX});
 			let resultCell = vec2(global_id.x, global_id.y);
-	        let index = resultCell.x + resultCell.y * u32(_Mask.size.x);
+	        let index = resultCell.x + resultCell.y * maskWidth;
 			_Mask.data[index] = 0.f;
 		}*/
 		
         @compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
         fn main(@builtin(global_invocation_id) global_id : vec3u)
 		{
+			let maskWidth = u32(${HeightMapX});
+			let maskWidthf = f32(maskWidth);
 			let numUnitsInBatch = u32(${MAX_UNITS_IN_WORKGROUP});
 			let resultCell = vec2(global_id.x, global_id.y);
-            let index = resultCell.x + resultCell.y * u32(_Height.size.x);
+            let index = resultCell.x + resultCell.y * maskWidth;
 			//_Mask.data[index] = 0.f;
 
 			for (var i = 0u; i < numUnitsInBatch; i++)
 			{
 			    let cpos = vec2(_Units.data[3 * i], _Units.data[3 * i + 1]);
-				let pos = vec2(f32(resultCell.x), f32(resultCell.y)) / _Height.size.xy;
+				let pos = vec2(f32(resultCell.x), f32(resultCell.y)) / maskWidthf;
 				let dist = length(cpos - pos);
 			    
 				let radius = _Units.data[3 * i + 2];
 				var v = smoothstep(radius, radius*0.5f, dist);
-				if (v > 0 && dist > 1.f/_Height.size.x)
+				if (v > 0 && dist > 1.f/maskWidthf)
 				{
-					let dp = (cpos - pos) / dist /_Height.size.x;
+					let dp = (cpos - pos) / dist / maskWidthf;
 					var p = pos;
-					let cindex = u32(cpos.x * _Height.size.x) + u32(cpos.y * _Height.size.y) * u32(_Height.size.x);
+					let cindex = u32(cpos.x * maskWidthf) + u32(cpos.y * maskWidthf) * maskWidth;
 					let h0 = _Height.data[cindex];
-					let snum = u32(dist * _Height.size.x);
+					let snum = u32(dist * maskWidthf);
 					for (var s = 0u; s < snum; s++)
 					{
-						let pindex = u32(p.x * _Height.size.x) + u32(p.y * _Height.size.y) * u32(_Height.size.x);
+						let pindex = u32(p.x * maskWidthf) + u32(p.y * maskWidthf) * maskWidth;
 						let h = _Height.data[pindex];
 						//_Mask.data[pindex] = 1.f;
 						if (h - h0 > 0.01f) 
@@ -288,12 +289,11 @@
 	const cellShaderModule = device.createShaderModule({
 	  label: 'Cell shader',
 		code: `
-        struct Matrix {
-	        size : vec2<f32>,
+        struct FloatBuffer {
             data: array<f32>,
         }
-		@group(0) @binding(0) var<storage, read> _Mask : Matrix;
-		@group(0) @binding(1) var<storage, read> _HeightMap : Matrix;
+		@group(0) @binding(0) var<storage, read> _Mask : FloatBuffer;
+		@group(0) @binding(1) var<storage, read> _HeightMap : FloatBuffer;
 		
 		struct VertexOutput {
 			@builtin(position) pos: vec4f,
@@ -309,9 +309,11 @@
 		@fragment
 		fn fragmentMain(input: VertexOutput) -> @location(0) vec4f
 		{
-			let idx = u32(input.pos.x/1024 * _Mask.size.x);
-			let idy = u32(input.pos.y/1024 * _Mask.size.y);
-			let id = idx + idy * u32(_Mask.size.x); 
+			let maskWidth = u32(${HeightMapX});
+			let maskWidthf = f32(maskWidth);
+			let idx = u32(input.pos.x/1024 * maskWidthf);
+			let idy = u32(input.pos.y/1024 * maskWidthf);
+			let id = idx + idy * maskWidth; 
 			let h = _HeightMap.data[id];
 			let c = _Mask.data[id];
 			let v = (c+0.2)*h;
@@ -386,10 +388,10 @@
 		fpsText.innerHTML = `ms: ${fps.toFixed(2)}`;
 
 		if(0){
-			let tmp = new Float32Array(HeightMapX*HeightMapY + 2);
-			tmp[0] = HeightMapX;
-			tmp[1] = HeightMapY;
-			tmp.fill(0,2);
+			let tmp = new Float32Array(HeightMapX*HeightMapY);
+			//tmp[0] = HeightMapX;
+			//tmp[1] = HeightMapY;
+			tmp.fill(0,0);
 			device.queue.writeBuffer(gpuBuffer_Mask, 0, tmp);
 		}
         const workgroupCountX = Math.ceil(HeightMapX / WORKGROUP_SIZE);
@@ -407,12 +409,12 @@
 		//const encoder = device.createCommandEncoder();
 		if (1)
 		{
-			if (_Units.length < MaxNumUnits*3 + 1)
+			if (_Units.length < MAX_UNITS_IN_WORKGROUP*3 + 1)
 			{
-				_Units = new Float32Array(MaxNumUnits*3 + 1);
-				_Units[0] = MaxNumUnits;
+				_Units = new Float32Array(MAX_UNITS_IN_WORKGROUP*3 + 1);
+				_Units[0] = MAX_UNITS_IN_WORKGROUP;
 				
-				for (let i = 0; i < MaxNumUnits; ++i) {
+				for (let i = 0; i < MAX_UNITS_IN_WORKGROUP; ++i) {
 					_Units[i * 3 + 1] = Math.random();
 					_Units[i * 3 + 2] = Math.random();
 					_Units[i * 3 + 3] = Math.random() / 20 + 0.05;
@@ -423,7 +425,7 @@
 			_Units[0 * 3 + 3] = 0.1;
 		}
 
-		for (let b = 0; b < NUM_BATCHES; ++b)
+		for (let b = 0; b < NUM_DISPATCH_BATCHES; ++b)
 		{
 			device.queue.writeBuffer(gpuBuffer_Units, 0, _Units, b*MAX_UNITS_IN_WORKGROUP*3+1, MAX_UNITS_IN_WORKGROUP*3);
 			
