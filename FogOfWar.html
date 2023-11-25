@@ -43,8 +43,8 @@
 	const HeightMapX = 512*1;
     const HeightMapY = 512*1;
 
-	const NUM_WORKGROUP_BATCHES = 4;
-	const MAX_UNITS_IN_WORKGROUP = NUM_WORKGROUP_BATCHES * 32 * 1;
+	const NUM_WORKGROUP_BATCHES = 8;
+	const MAX_UNITS_IN_WORKGROUP = NUM_WORKGROUP_BATCHES * 128;
     const MaxNumUnits = MAX_UNITS_IN_WORKGROUP * 1;
 	const NUM_DISPATCH_BATCHES = MaxNumUnits / MAX_UNITS_IN_WORKGROUP;
 	const WORKGROUP_SIZE = 8;
@@ -142,11 +142,11 @@
 		//gpuBuffer_Units.unmap();
 	}
 
-    const gpuBuffer_Mask = device.createBuffer({ mappedAtCreation: true, size: (HeightMapX*HeightMapY)*4, usage: GPUBufferUsage.STORAGE});
+    const gpuBuffer_Mask = device.createBuffer({ mappedAtCreation: false, size: HeightMapX*HeightMapY*NUM_WORKGROUP_BATCHES*4, usage: GPUBufferUsage.STORAGE});
 	{
-		const stagingData = new Float32Array(gpuBuffer_Mask.getMappedRange());
+		//const stagingData = new Float32Array(gpuBuffer_Mask.getMappedRange());
 		//stagingData[0] = HeightMapX; stagingData[1] = HeightMapY;
-		gpuBuffer_Mask.unmap();
+		//gpuBuffer_Mask.unmap();
 	}
 	const computeModuleClear = device.createShaderModule({
         code: `
@@ -159,8 +159,9 @@
         fn clear(@builtin(global_invocation_id) global_id : vec3<u32>)
 		{
 			let maskWidth = u32(${HeightMapX});
+			let numBatches = u32(${NUM_WORKGROUP_BATCHES});
 			let resultCell = vec2(global_id.x, global_id.y);
-	        let index = resultCell.x + resultCell.y * maskWidth;
+	        let index = resultCell.x + resultCell.y * maskWidth * numBatches;
 			_Mask.data[index] = 0.f;
 		}
     `
@@ -178,29 +179,24 @@
         @group(0) @binding(1) var<storage, read>		_Height : FloatBuffer;
         @group(0) @binding(2) var<storage, read>		_Units : Units;
 
-		/*@compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
-        fn clear(@builtin(global_invocation_id) global_id : vec3u)
-		{
-			let maskWidth = u32(${HeightMapX});
-			let resultCell = vec2(global_id.x, global_id.y);
-	        let index = resultCell.x + resultCell.y * maskWidth;
-			_Mask.data[index] = 0.f;
-		}*/
-		
         @compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
         fn main(@builtin(global_invocation_id) global_id : vec3u)
 		{
+			let numBatches = u32(${NUM_WORKGROUP_BATCHES});
 			let maskWidth = u32(${HeightMapX});
 			let maskWidthf = f32(maskWidth);
-			let numUnitsInBatch = u32(${MAX_UNITS_IN_WORKGROUP});
-			let resultCell = vec2(global_id.x, global_id.y);
-            let index = resultCell.x + resultCell.y * maskWidth;
-			//_Mask.data[index] = 0.f;
+			let numUnitsInBatch = u32(${MAX_UNITS_IN_WORKGROUP}) / numBatches;
 
-			for (var i = 0u; i < numUnitsInBatch; i++)
+			let lx = global_id.x % maskWidth;
+			let b = global_id.x / maskWidth;
+            let maskIndex = b*maskWidth*maskWidth + lx + global_id.y * maskWidth;
+			let u1 = b * numUnitsInBatch;
+			let u2 = u1 + numUnitsInBatch;
+
+			for (var i = u1; i < u2; i++)
 			{
 			    let cpos = vec2(_Units.data[3 * i], _Units.data[3 * i + 1]);
-				let pos = vec2(f32(resultCell.x), f32(resultCell.y)) / maskWidthf;
+				let pos = vec2(f32(lx), f32(global_id.y)) / maskWidthf;
 				let dist = length(cpos - pos);
 			    
 				let radius = _Units.data[3 * i + 2];
@@ -227,9 +223,9 @@
 				}
 
 				//v = f32(u1/numUnitsInBatch)/f32(numBatches);//global_id.x)/1024.f/8.f;
-				let val = max(_Mask.data[index], v);
-				//let val = _Mask.data[index] + v;
-				_Mask.data[index] = val;
+				let val = max(_Mask.data[maskIndex], v);
+				//let val = _Mask.data[maskIndex] + v;
+				_Mask.data[maskIndex] = val;
 				//if (val >= 1) {break;}
 			}
         }
@@ -309,14 +305,22 @@
 		@fragment
 		fn fragmentMain(input: VertexOutput) -> @location(0) vec4f
 		{
+			let numBatches = u32(${NUM_WORKGROUP_BATCHES});
 			let maskWidth = u32(${HeightMapX});
 			let maskWidthf = f32(maskWidth);
 			let idx = u32(input.pos.x/1024 * maskWidthf);
 			let idy = u32(input.pos.y/1024 * maskWidthf);
-			let id = idx + idy * maskWidth; 
-			let h = _HeightMap.data[id];
-			let c = _Mask.data[id];
-			let v = (c+0.2)*h;
+
+			var c = 0.0;
+			for (var b = 0u; b < numBatches; b++)
+			{
+				let maskIndex = b*maskWidth*maskWidth + idx + idy * maskWidth;
+				c = max(c, _Mask.data[maskIndex]);
+			}
+
+			let heightIndex = idx + idy * maskWidth;
+			let h = _HeightMap.data[heightIndex];
+			let v = (c + 0.2) * h;
 			return vec4f(0.01, v, 0.01, 1);
 		}
 	  `
@@ -394,7 +398,7 @@
 			tmp.fill(0,0);
 			device.queue.writeBuffer(gpuBuffer_Mask, 0, tmp);
 		}
-        const workgroupCountX = Math.ceil(HeightMapX / WORKGROUP_SIZE);
+        const workgroupCountX = Math.ceil(HeightMapX / WORKGROUP_SIZE)*NUM_WORKGROUP_BATCHES;
         const workgroupCountY = Math.ceil(HeightMapY / WORKGROUP_SIZE);
 		//const encoder = device.createCommandEncoder();
 		if (1){
